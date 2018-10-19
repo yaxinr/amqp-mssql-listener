@@ -1,0 +1,4 @@
+debug
+*.json
+deploy*
+*.bat
