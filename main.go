@@ -173,7 +173,7 @@ func (listenersFabric *ListenersFabric) add(key string, listener *Listener) erro
 }
 
 func (listenersFabric *ListenersFabric) save() error {
-	listenersJSON, _ := json.Marshal(listenersFabric.listeners)
+	listenersJSON, _ := json.MarshalIndent(listenersFabric.listeners, "", "\t")
 	return ioutil.WriteFile("mssql-listeners.json", listenersJSON, os.ModePerm)
 }
 
@@ -188,7 +188,9 @@ func (listenersFabric *ListenersFabric) load() error {
 		for k, l := range listeners {
 			err = listenersFabric.add(k, l)
 			if err == nil {
-				l.start()
+				if err := l.start(); err != nil {
+					fmt.Println(err)
+				}
 			}
 		}
 	} else {
@@ -259,12 +261,12 @@ type Listener struct {
 }
 
 // ExecuteNonQuery ...
-func (listener Listener) ExecuteNonQuery(commandText string) {
+func (listener Listener) ExecuteNonQuery(commandText string) error {
 	_, err := listener.db.Exec(commandText)
-	if *devPtr {
-		fmt.Println(commandText)
-	}
-	failOnError(err, "listener.db.Exec")
+	// if *devPtr {
+	// 	fmt.Println(commandText)
+	// }
+	return err
 }
 
 func (listener Listener) routingKey() string {
@@ -303,9 +305,15 @@ func (listener Listener) start() error {
 		IF OBJECT_ID ('{{.SchemaName}}.{{.InstallListenerProcedureName}}', 'P') IS NOT NULL
 			EXEC {{.SchemaName}}.{{.InstallListenerProcedureName}}
 		`, listener)
-	listener.ExecuteNonQuery(listener.getInstallNotificationProcedureScript())
-	listener.ExecuteNonQuery(listener.getUninstallNotificationProcedureScript())
-	listener.ExecuteNonQuery(execInstallationProcedureScript)
+	if err := listener.ExecuteNonQuery(listener.getInstallNotificationProcedureScript()); err != nil {
+		return err
+	}
+	if err := listener.ExecuteNonQuery(listener.getUninstallNotificationProcedureScript()); err != nil {
+		return err
+	}
+	if err := listener.ExecuteNonQuery(execInstallationProcedureScript); err != nil {
+		return err
+	}
 	err := ch.ExchangeDeclare(
 		listener.exchangeName, // name
 		"topic",               // type
@@ -706,7 +714,8 @@ func (listener Listener) getInstallNotificationProcedureScript() string {
 
 	s = getScript("uninstallNotificationTriggerScript", `
 		IF OBJECT_ID ('{{.SchemaName}}.{{.ConversationTriggerName}}', 'TR') IS NOT NULL
-		       DROP TRIGGER {{.SchemaName}}.{{.ConversationTriggerName}};
+			--   DROP TRIGGER {{.SchemaName}}.{{.ConversationTriggerName}};
+			RETURN;
 `, listener)
 	listener.UninstallNotificationTriggerScript = strings.Replace(s, "'", "''", -1)
 

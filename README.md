@@ -17,7 +17,7 @@ go run main.go -amqp-uri=amqp://guest:guest@localhost:5672/ -queue=mssql-subscri
 JSON =
 ```json
 {
-  "ConnectionString": "sqlserver://sqlserver://username:password@host:port/instance?database=<Database>",
+  "ConnectionString": "sqlserver://username:password@host:port/instance?database=<Database>",
   "TableName"       : "<Table>",
   "Identity": "a_eq_1",
   "Select": "a",
@@ -34,7 +34,7 @@ create file mssql-listeners.json
 ```json
 {
     "test": {
-        "ConnectionString": "sqlserver://sqlserver://username:password@host:port/instance?database=<Database>",
+        "ConnectionString": "sqlserver://username:password@host:port/instance?database=<Database>",
         "SchemaName": "dbo",
         "TableName"       : "<Table>",
         "Identity": "field1_eq_A",
