@@ -9,12 +9,14 @@ import (
 	"io/ioutil"
 	"log"
 	"net/url"
-	"time"
-	// "net/http"
-	// _ "net/http/pprof"
 	"os"
+	"paker/paker"
 	"strings"
 	"text/template"
+	"time"
+
+	// "net/http"
+	// _ "net/http/pprof"
 
 	xj "github.com/basgys/goxml2json"
 	_ "github.com/denisenkom/go-mssqldb"
@@ -30,24 +32,15 @@ var (
 	rabbitCloseError chan *amqp.Error
 	msgs             <-chan amqp.Delivery
 	ch               *amqp.Channel
-	listenersFabric  ListenersFabric
+	listenersFabric  = ListenersFabric{
+		listeners: make(map[string]*Listener, 0),
+	}
 )
 
 func main() {
 	flag.Parse()
 	// go http.ListenAndServe("0.0.0.0:9088", nil)
-	defer ch.Close()
-	defer rabbitConn.Close()
-	rabbitCloseError = make(chan *amqp.Error)
-	forever := make(chan bool)
-
-	// run the callback in a separate thread
-	go rabbitConnector(rabbitCloseError, rabbitConn, ch, setup)
-
-	// establish the rabbitmq connection by sending
-	// an error and thus calling the error callback
-	rabbitCloseError <- amqp.ErrClosed
-	<-forever
+	paker.MainConnect(rabbitConn, ch, setup)
 }
 
 func failOnError(err error, msg string) {
@@ -154,21 +147,7 @@ type ListenersFabric struct {
 }
 
 func (listenersFabric *ListenersFabric) add(key string, listener *Listener) error {
-	db, err := sql.Open("sqlserver", listener.ConnectionString)
-	if err != nil {
-		return err
-	}
-	err = db.Ping()
-	if err != nil {
-		return err
-	}
-
-	listener.db = db
-	if listenersFabric.listeners == nil {
-		listenersFabric.listeners = make(map[string]*Listener, 0)
-	}
 	listenersFabric.listeners[key] = listener
-	listenersFabric.save()
 	return nil
 }
 
@@ -180,18 +159,18 @@ func (listenersFabric *ListenersFabric) save() error {
 func (listenersFabric *ListenersFabric) load() error {
 	listenersJSON, err := ioutil.ReadFile("mssql-listeners.json")
 	if err == nil {
-		var listeners map[string]*Listener
-		err := json.Unmarshal(listenersJSON, &listeners)
+		// var listeners map[string]*Listener
+		err := json.Unmarshal(listenersJSON, &listenersFabric.listeners)
 		if err != nil {
 			return err
 		}
-		for k, l := range listeners {
-			err = listenersFabric.add(k, l)
-			if err == nil {
-				if err := l.start(); err != nil {
-					fmt.Println(err)
-				}
+		for _, listener := range listenersFabric.listeners {
+			// err = listenersFabric.add(k, l)
+			// if err == nil {
+			if err := listener.start(); err != nil {
+				fmt.Println(err)
 			}
+			// }
 		}
 	} else {
 		return err
@@ -217,15 +196,14 @@ func (listenersFabric *ListenersFabric) subscribe(body []byte, replyTo string) e
 	exchangeName, _ := urlParse(req.ConnectionString)
 	key := fmt.Sprintf("%s-%s-%s", exchangeName, req.TableName, req.Identity)
 	l, ok := listenersFabric.listeners[key]
+	l = &req
+	l.replyTo = replyTo
 	if !ok {
-		l = &req
-		l.replyTo = replyTo
 		if err := listenersFabric.add(key, l); err != nil {
 			return err
 		}
 	}
-	l.DetailsIncluded = req.DetailsIncluded
-	l.replyTo = replyTo
+	listenersFabric.listeners[key] = l
 	listenersFabric.save()
 	l.start()
 	return nil
@@ -266,6 +244,9 @@ func (listener Listener) ExecuteNonQuery(commandText string) error {
 	// if *devPtr {
 	// 	fmt.Println(commandText)
 	// }
+	if err != nil {
+		fmt.Println(commandText)
+	}
 	return err
 }
 
@@ -288,6 +269,14 @@ func x2j(xmlText string, detailed bool) []byte {
 }
 
 func (listener Listener) start() error {
+	var err error
+	if listener.db, err = sql.Open("sqlserver", listener.ConnectionString); err != nil {
+		return err
+	}
+	if err = listener.db.Ping(); err != nil {
+		return err
+	}
+
 	listener.exchangeName, listener.DatabaseName = urlParse(listener.ConnectionString)
 	if listener.SchemaName == "" {
 		listener.SchemaName = "dbo"
@@ -305,16 +294,16 @@ func (listener Listener) start() error {
 		IF OBJECT_ID ('{{.SchemaName}}.{{.InstallListenerProcedureName}}', 'P') IS NOT NULL
 			EXEC {{.SchemaName}}.{{.InstallListenerProcedureName}}
 		`, listener)
-	if err := listener.ExecuteNonQuery(listener.getInstallNotificationProcedureScript()); err != nil {
+	if err = listener.ExecuteNonQuery(listener.getInstallNotificationProcedureScript()); err != nil {
 		return err
 	}
-	if err := listener.ExecuteNonQuery(listener.getUninstallNotificationProcedureScript()); err != nil {
+	if err = listener.ExecuteNonQuery(listener.getUninstallNotificationProcedureScript()); err != nil {
 		return err
 	}
-	if err := listener.ExecuteNonQuery(execInstallationProcedureScript); err != nil {
+	if err = listener.ExecuteNonQuery(execInstallationProcedureScript); err != nil {
 		return err
 	}
-	err := ch.ExchangeDeclare(
+	err = ch.ExchangeDeclare(
 		listener.exchangeName, // name
 		"topic",               // type
 		true,                  // durable
@@ -355,30 +344,38 @@ func (listener Listener) start() error {
 			SELECT isnull(CAST(@message AS NVARCHAR(MAX)), '')
 	`, listener)
 			defer listener.stop()
-			listener.db.Prepare(commandText)
+			var (
+				s          string
+				routingKey = listener.routingKey()
+				msg        = amqp.Publishing{}
+			)
+			stmt, err := listener.db.Prepare(commandText)
+			failOnError(err, "db.Prepare: "+commandText)
 			for {
-				var s string
-				err := listener.db.QueryRow(commandText).Scan(&s)
+				err = stmt.QueryRow().Scan(&s)
 				if err != nil {
 					if strings.Contains(err.Error(), "i/o timeout") {
 						continue
 					}
 					failOnError(err, "db.Query: "+commandText)
 				}
-				if s != "" {
+				if len(s) > 0 {
+					msg.Body = x2j(s, listener.DetailsIncluded)
 					err = ch.Publish(
 						listener.exchangeName, // exchange
-						listener.routingKey(), // routing key
-						false, // mandatory
-						false, // immediate
-						amqp.Publishing{
-							Body: x2j(s, listener.DetailsIncluded),
-						})
-					failOnError(err, "ch.Publish")
+						routingKey,            // routing key
+						false,                 // mandatory
+						false,                 // immediate
+						msg)
+					if err != nil {
+						log.Fatalf("%s: %s", "ch.Publish", err)
+						panic(fmt.Sprintf("%s: %s", "ch.Publish", err))
+					}
 				}
 			}
 		}()
 	}
+	fmt.Println(suffix + " started")
 	return nil
 }
 
