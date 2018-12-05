@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"paker/paker"
 	"strings"
 	"text/template"
 	"time"
@@ -40,7 +39,13 @@ var (
 func main() {
 	flag.Parse()
 	// go http.ListenAndServe("0.0.0.0:9088", nil)
-	paker.MainConnect(rabbitConn, ch, setup)
+	defer ch.Close()		
+  defer rabbitConn.Close()
+	rabbitCloseError = make(chan *amqp.Error)		
+  forever := make(chan bool)
+	go rabbitConnector(rabbitCloseError, rabbitConn, ch, setup)
+	rabbitCloseError <- amqp.ErrClosed
+	<-forever
 }
 
 func failOnError(err error, msg string) {
