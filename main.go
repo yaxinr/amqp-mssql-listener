@@ -572,11 +572,11 @@ const SQL_FORMAT_CREATE_INSTALLATION_PROCEDURE = `
 // detailed,
 // this.SchemaName)
 const SQL_FORMAT_CREATE_NOTIFICATION_TRIGGER = `
-		CREATE TRIGGER [{{.ConversationTriggerName}}]
-		ON {{.SchemaName}}.[{{.TableName}}]
-		AFTER {{.TriggerType}}
-		AS
-
+	CREATE TRIGGER [{{.ConversationTriggerName}}]
+	ON {{.SchemaName}}.[{{.TableName}}]
+	AFTER {{.TriggerType}}
+	AS
+	BEGIN
 		SET NOCOUNT ON;
 
 		--Trigger {{.TableName}} is rising...
@@ -619,6 +619,7 @@ const SQL_FORMAT_CREATE_NOTIFICATION_TRIGGER = `
 				END CONVERSATION @ConvHandle;
 			END
 		END
+	END
 `
 
 // #endregion
@@ -716,8 +717,8 @@ func (listener Listener) getInstallNotificationProcedureScript() string {
 
 	s = getScript("uninstallNotificationTriggerScript", `
 		IF OBJECT_ID ('{{.SchemaName}}.{{.ConversationTriggerName}}', 'TR') IS NOT NULL
-			--   DROP TRIGGER {{.SchemaName}}.{{.ConversationTriggerName}};
-			RETURN;
+			  DROP TRIGGER {{.SchemaName}}.{{.ConversationTriggerName}};
+		--	RETURN;
 `, listener)
 	listener.UninstallNotificationTriggerScript = strings.Replace(s, "'", "''", -1)
 
