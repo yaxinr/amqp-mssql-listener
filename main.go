@@ -39,10 +39,10 @@ var (
 func main() {
 	flag.Parse()
 	// go http.ListenAndServe("0.0.0.0:9088", nil)
-	defer ch.Close()		
-  defer rabbitConn.Close()
-	rabbitCloseError = make(chan *amqp.Error)		
-  forever := make(chan bool)
+	defer ch.Close()
+	defer rabbitConn.Close()
+	rabbitCloseError = make(chan *amqp.Error)
+	forever := make(chan bool)
 	go rabbitConnector(rabbitCloseError, rabbitConn, ch, setup)
 	rabbitCloseError <- amqp.ErrClosed
 	<-forever
@@ -356,6 +356,9 @@ func (listener Listener) start() error {
 			)
 			stmt, err := listener.db.Prepare(commandText)
 			failOnError(err, "db.Prepare: "+commandText)
+			if *devPtr {
+				fmt.Println(commandText)
+			}
 			for {
 				err = stmt.QueryRow().Scan(&s)
 				if err != nil {
@@ -365,6 +368,9 @@ func (listener Listener) start() error {
 					failOnError(err, "db.Query: "+commandText)
 				}
 				if len(s) > 0 {
+					if *devPtr {
+						fmt.Println(s)
+					}
 					msg.Body = x2j(s, listener.DetailsIncluded)
 					err = ch.Publish(
 						listener.exchangeName, // exchange
@@ -487,16 +493,23 @@ const SQL_FORMAT_CREATE_INSTALLATION_PROCEDURE = `
 					-- Service Broker configuration statement
 					{{.InstallServiceBrokerNotificationScript}}
 
-					-- Notification Trigger check statement
-					{{.UninstallNotificationTriggerScript}}
-
 					-- Notification Trigger configuration statement
 					DECLARE @triggerStatement NVARCHAR(MAX)
 					DECLARE @select NVARCHAR(MAX)
 					DECLARE @sqlInserted NVARCHAR(MAX)
 					DECLARE @sqlDeleted NVARCHAR(MAX)
 
-					SET @triggerStatement = N''{{.InstallNotificationTriggerScript}}''
+          EXEC sp_executesql N''DROP FUNCTION [dbo].[spaceLess]''
+
+          EXEC sp_executesql N''CREATE FUNCTION dbo.spaceLess(@p1 varchar(max)) RETURNS varchar(max) AS
+          BEGIN
+            RETURN upper(replace(replace(replace(replace(@p1,space(1),space(0)),char(9),space(0)),char(10),space(0)),char(13),space(0)))
+          END''
+          
+          declare @triggerID int = OBJECT_ID (''{{.SchemaName}}.{{.ConversationTriggerName}}'', ''TR'')	
+          declare @oldTriggerDef nvarchar(max)= (SELECT dbo.spaceLess(OBJECT_DEFINITION (@triggerID)) );  
+
+          SET @triggerStatement = N''{{.InstallNotificationTriggerScript}}''
 
 					IF len(N''{{.Select}}'')=0
 						SET @select = STUFF((SELECT '','' + ''['' + COLUMN_NAME + '']''
@@ -522,7 +535,13 @@ const SQL_FORMAT_CREATE_INSTALLATION_PROCEDURE = `
 					SET @triggerStatement = REPLACE(@triggerStatement
 											 , ''%deleted_select_statement%'', @sqlDeleted)
 
-					EXEC sp_executesql @triggerStatement
+          IF @triggerID IS NOT NULL
+          BEGIN
+            if @oldTriggerDef = dbo.spaceLess(@triggerStatement)
+              RETURN;
+            DROP TRIGGER {{.SchemaName}}.{{.ConversationTriggerName}};
+          END
+          EXEC sp_executesql @triggerStatement
 				END
 				')
 		END
