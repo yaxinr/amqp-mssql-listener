@@ -29,9 +29,8 @@ var (
 
 	rabbitConn       *amqp.Connection
 	rabbitCloseError chan *amqp.Error
-	msgs             <-chan amqp.Delivery
-	ch               *amqp.Channel
-	listenersFabric  = ListenersFabric{
+
+	listenersFabric = ListenersFabric{
 		listeners: make(map[string]*Listener, 0),
 	}
 )
@@ -39,11 +38,11 @@ var (
 func main() {
 	flag.Parse()
 	// go http.ListenAndServe("0.0.0.0:9088", nil)
-	defer ch.Close()
+
 	defer rabbitConn.Close()
 	rabbitCloseError = make(chan *amqp.Error)
 	forever := make(chan bool)
-	go rabbitConnector(rabbitCloseError, rabbitConn, ch, setup)
+	go rabbitConnector(rabbitCloseError, rabbitConn, setup)
 	rabbitCloseError <- amqp.ErrClosed
 	<-forever
 }
@@ -69,7 +68,7 @@ func connectToRabbitMQ() *amqp.Connection {
 	}
 }
 
-func rabbitConnector(rabbitCloseError chan *amqp.Error, rabbitConn *amqp.Connection, ch *amqp.Channel, fn func(conn *amqp.Connection, ch *amqp.Channel)) {
+func rabbitConnector(rabbitCloseError chan *amqp.Error, rabbitConn *amqp.Connection, fn func(conn *amqp.Connection, ch *amqp.Channel)) {
 	var rabbitErr *amqp.Error
 
 	for {
@@ -83,7 +82,7 @@ func rabbitConnector(rabbitCloseError chan *amqp.Error, rabbitConn *amqp.Connect
 			rabbitConn.NotifyClose(rabbitCloseError)
 
 			var err error
-			ch, err = rabbitConn.Channel()
+			ch, err := rabbitConn.Channel()
 			failOnError(err, "Failed to open a channel")
 			ch.NotifyClose(rabbitCloseError)
 
@@ -126,17 +125,16 @@ func consumeQueue(ch *amqp.Channel, queue string) (<-chan amqp.Delivery, error) 
 	return msgs, err
 }
 
-func setup(conn *amqp.Connection, ch1 *amqp.Channel) {
-	ch = ch1
+func setup(conn *amqp.Connection, ch *amqp.Channel) {
 	rabbitConn = conn
 
-	listenersFabric.load()
+	listenersFabric.load(ch)
 
 	queue := *queuePtr
-	msgs, _ = consumeQueue(ch, queue)
+	msgs, _ := consumeQueue(ch, queue)
 	go func() {
 		for d := range msgs {
-			err := listenersFabric.subscribe(d.Body, d.ReplyTo)
+			err := listenersFabric.subscribe(d.Body, d.ReplyTo, ch)
 			if err == nil {
 				d.Ack(false)
 			} else {
@@ -161,7 +159,7 @@ func (listenersFabric *ListenersFabric) save() error {
 	return ioutil.WriteFile("mssql-listeners.json", listenersJSON, os.ModePerm)
 }
 
-func (listenersFabric *ListenersFabric) load() error {
+func (listenersFabric *ListenersFabric) load(ch *amqp.Channel) error {
 	listenersJSON, err := ioutil.ReadFile("mssql-listeners.json")
 	if err == nil {
 		// var listeners map[string]*Listener
@@ -172,7 +170,7 @@ func (listenersFabric *ListenersFabric) load() error {
 		for _, listener := range listenersFabric.listeners {
 			// err = listenersFabric.add(k, l)
 			// if err == nil {
-			if err := listener.start(); err != nil {
+			if err := listener.start(ch); err != nil {
 				fmt.Println(err)
 			}
 			// }
@@ -191,7 +189,7 @@ func urlParse(rawurl string) (exchangeName string, databaseName string) {
 	return fmt.Sprintf("%s-%s-%s-%s", URL.Host, URL.Port(), URL.Path, database), database
 }
 
-func (listenersFabric *ListenersFabric) subscribe(body []byte, replyTo string) error {
+func (listenersFabric *ListenersFabric) subscribe(body []byte, replyTo string, ch *amqp.Channel) error {
 	var req Listener
 	err := json.Unmarshal(body, &req)
 	if err != nil {
@@ -210,7 +208,9 @@ func (listenersFabric *ListenersFabric) subscribe(body []byte, replyTo string) e
 	}
 	listenersFabric.listeners[key] = l
 	listenersFabric.save()
-	l.start()
+	if err := l.start(ch); err != nil {
+		fmt.Println(err)
+	}
 	return nil
 }
 
@@ -226,6 +226,8 @@ type Listener struct {
 	TableName                                string
 	TriggerType                              string
 	Select                                   string
+	SelectScript                             string
+	SelectIsEmpty                            int
 	IfUpdate                                 string
 	Where                                    string
 	DetailsIncluded                          bool
@@ -273,7 +275,7 @@ func x2j(xmlText string, detailed bool) []byte {
 	return emptyJSON
 }
 
-func (listener Listener) start() error {
+func (listener Listener) start(ch *amqp.Channel) error {
 	var err error
 	if listener.db, err = sql.Open("sqlserver", listener.ConnectionString); err != nil {
 		return err
@@ -511,14 +513,14 @@ const SQL_FORMAT_CREATE_INSTALLATION_PROCEDURE = `
 
           SET @triggerStatement = N''{{.InstallNotificationTriggerScript}}''
 
-					IF len(N''{{.Select}}'')=0
+					IF {{.SelectIsEmpty}}=0
 						SET @select = STUFF((SELECT '','' + ''['' + COLUMN_NAME + '']''
 										 FROM INFORMATION_SCHEMA.COLUMNS
 										 WHERE DATA_TYPE NOT IN  (''text'',''ntext'',''image'',''geometry'',''geography'') 
 										 AND TABLE_SCHEMA = ''{{.SchemaName}}'' AND TABLE_NAME = ''{{.TableName}}'' AND TABLE_CATALOG = ''{{.DatabaseName}}''
 										 FOR XML PATH ('''')
 										 ), 1, 1, '''')
-					ELSE SET @select = N''{{.Select}}''
+					ELSE SET @select = N''{{.SelectScript}}''
 
 					SET @sqlInserted =
 						N''SET @retvalOUT = (SELECT '' + @select + N''
@@ -740,6 +742,8 @@ func (listener Listener) getInstallNotificationProcedureScript() string {
 		--	RETURN;
 `, listener)
 	listener.UninstallNotificationTriggerScript = strings.Replace(s, "'", "''", -1)
+	listener.SelectIsEmpty = len(listener.Select)
+	listener.SelectScript = strings.Replace(listener.Select, "'", "''''", -1)
 
 	return getScript("installationProcedureScript", SQL_FORMAT_CREATE_INSTALLATION_PROCEDURE, listener)
 }
