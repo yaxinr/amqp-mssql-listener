@@ -233,6 +233,7 @@ type Listener struct {
 	SelectScript                             string
 	SelectIsEmpty                            int
 	IfUpdate                                 string
+	Fields                                   []string
 	Where                                    string
 	DetailsIncluded                          bool
 	Detailed                                 string `json:"-"`
@@ -279,6 +280,18 @@ func x2j(xmlText string, detailed bool) []byte {
 	return emptyJSON
 }
 
+var updatedFieldSQL = func(fieldName string) string {
+	return "UPDATE("+fieldName+")"
+}
+
+func mapStrSlice(vs []string, f func(string) string) []string {
+	vsm := make([]string, len(vs))
+	for i, v := range vs {
+			vsm[i] = f(v)
+	}
+	return vsm
+}
+
 func (listener Listener) start(ch *amqp.Channel) error {
 	var err error
 	if listener.db, err = sql.Open("sqlserver", listener.ConnectionString); err != nil {
@@ -293,6 +306,9 @@ func (listener Listener) start(ch *amqp.Channel) error {
 		listener.SchemaName = "dbo"
 	}
 	suffix := listener.routingKey()
+	if len(listener.IfUpdate)==0 && len(listener.Fields)>0{
+		listener.IfUpdate = strings.Join(mapStrSlice(listener.Fields, updatedFieldSQL), " and ")
+	}
 	listener.ConversationQueueName = "ListenerQueue_" + suffix
 	listener.ConversationServiceName = "ListenerService_" + suffix
 	listener.ConversationTriggerName = "tr_Listener_" + suffix
@@ -601,39 +617,34 @@ const SQL_FORMAT_CREATE_NOTIFICATION_TRIGGER = `
 	ON {{.SchemaName}}.[{{.TableName}}]
 	AFTER {{.TriggerType}}
 	AS
+	{{if .IfUpdate}}IF {{.IfUpdate}}{{end}}
 	BEGIN
 		SET NOCOUNT ON;
 
 		--Trigger {{.TableName}} is rising...
 		IF EXISTS (SELECT * FROM sys.services WHERE name = '{{.ConversationServiceName}}')
-		{{if .IfUpdate}}IF {{.IfUpdate}}{{end}}
 		BEGIN
-			DECLARE @message NVARCHAR(MAX)
+			DECLARE @message NVARCHAR(MAX) = ''
+			{{if .DetailsIncluded}}
 			SET @message = N'<root/>'
+			DECLARE @retvalOUT NVARCHAR(MAX)
 
-			IF ({{.Detailed}} EXISTS(SELECT 1))
-			BEGIN
-				DECLARE @retvalOUT NVARCHAR(MAX)
+			%inserted_select_statement%
 
-				%inserted_select_statement%
+			IF (@retvalOUT IS NOT NULL)
+				SET @message = N'<root>' + @retvalOUT
 
-				IF (@retvalOUT IS NOT NULL)
-				BEGIN SET @message = N'<root>' + @retvalOUT END
+			%deleted_select_statement%
 
-				%deleted_select_statement%
+			IF (@retvalOUT IS NOT NULL)
+				IF (@message = N'<root/>') SET @message = N'<root>' + @retvalOUT
+				ELSE SET @message = @message + @retvalOUT
 
-				IF (@retvalOUT IS NOT NULL)
-				BEGIN
-					IF (@message = N'<root/>') BEGIN SET @message = N'<root>' + @retvalOUT END
-					ELSE BEGIN SET @message = @message + @retvalOUT END
-				END
-
-				IF (@message != N'<root/>') BEGIN SET @message = @message + N'</root>' END
-			END
-
-			--Beginning of dialog...
 			IF (@message != N'<root/>')
-				SET @message = ''
+				SET @message = @message + N'</root>'
+			ELSE RETURN
+			{{end}}
+			--Beginning of dialog...
 			DECLARE @ConvHandle UNIQUEIDENTIFIER
 			--Determine the Initiator Service, Target Service and the Contract
 			BEGIN DIALOG @ConvHandle
