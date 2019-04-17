@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -196,6 +197,9 @@ func (listenersFabric *ListenersFabric) subscribe(body []byte, replyTo string, c
 		return err
 	}
 	// log.Printf(string(d.Body))
+	if len(req.ConnectionString) == 0 {
+		return errors.New("ConnectionString is empty")
+	}
 	exchangeName, _ := urlParse(req.ConnectionString)
 	key := fmt.Sprintf("%s-%s-%s", exchangeName, req.TableName, req.Identity)
 	l, ok := listenersFabric.listeners[key]
@@ -629,16 +633,15 @@ const SQL_FORMAT_CREATE_NOTIFICATION_TRIGGER = `
 
 			--Beginning of dialog...
 			IF (@message != N'<root/>')
-			BEGIN
-				DECLARE @ConvHandle UNIQUEIDENTIFIER
-				--Determine the Initiator Service, Target Service and the Contract
-				BEGIN DIALOG @ConvHandle
-					FROM SERVICE [{{.ConversationServiceName}}] TO SERVICE '{{.ConversationServiceName}}' ON CONTRACT [DEFAULT] WITH ENCRYPTION=OFF, LIFETIME = 60;
+				SET @message = ''
+			DECLARE @ConvHandle UNIQUEIDENTIFIER
+			--Determine the Initiator Service, Target Service and the Contract
+			BEGIN DIALOG @ConvHandle
+				FROM SERVICE [{{.ConversationServiceName}}] TO SERVICE '{{.ConversationServiceName}}' ON CONTRACT [DEFAULT] WITH ENCRYPTION=OFF, LIFETIME = 60;
 
-				SEND ON CONVERSATION @ConvHandle MESSAGE TYPE [DEFAULT] (@message);
+			SEND ON CONVERSATION @ConvHandle MESSAGE TYPE [DEFAULT] (@message);
 
-				END CONVERSATION @ConvHandle;
-			END
+			END CONVERSATION @ConvHandle;
 		END
 	END
 `
