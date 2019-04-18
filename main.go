@@ -310,7 +310,7 @@ func (listener Listener) start(ch *amqp.Channel) error {
 	}
 	suffix := listener.routingKey()
 	if len(listener.IfUpdate) == 0 && len(listener.Fields) > 0 {
-		listener.IfUpdate = strings.Join(mapStrSlice(listener.Fields, updatedFieldSQL), " and ")
+		listener.IfUpdate = strings.Join(mapStrSlice(listener.Fields, updatedFieldSQL), " OR ")
 	}
 	listener.ConversationQueueName = "ListenerQueue_" + suffix
 	listener.ConversationServiceName = "ListenerService_" + suffix
