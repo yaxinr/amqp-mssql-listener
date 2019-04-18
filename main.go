@@ -234,11 +234,13 @@ type Listener struct {
 	SelectIsEmpty                            int
 	IfUpdate                                 string
 	Fields                                   []string
+	Join                                     string
 	Where                                    string
 	DetailsIncluded                          bool
 	Detailed                                 string `json:"-"`
 	Identity                                 string
 	ConversationQueueName                    string `json:"-"`
+	QuotedJoin                               string `json:"-"`
 	QuotedWhere                              string `json:"-"`
 	ConversationServiceName                  string `json:"-"`
 	ConversationTriggerName                  string `json:"-"`
@@ -257,6 +259,7 @@ func (listener Listener) ExecuteNonQuery(commandText string) error {
 	// 	fmt.Println(commandText)
 	// }
 	if err != nil {
+		fmt.Println(err)
 		fmt.Println(commandText)
 	}
 	return err
@@ -281,13 +284,13 @@ func x2j(xmlText string, detailed bool) []byte {
 }
 
 var updatedFieldSQL = func(fieldName string) string {
-	return "UPDATE("+fieldName+")"
+	return "UPDATE(" + fieldName + ")"
 }
 
 func mapStrSlice(vs []string, f func(string) string) []string {
 	vsm := make([]string, len(vs))
 	for i, v := range vs {
-			vsm[i] = f(v)
+		vsm[i] = f(v)
 	}
 	return vsm
 }
@@ -306,7 +309,7 @@ func (listener Listener) start(ch *amqp.Channel) error {
 		listener.SchemaName = "dbo"
 	}
 	suffix := listener.routingKey()
-	if len(listener.IfUpdate)==0 && len(listener.Fields)>0{
+	if len(listener.IfUpdate) == 0 && len(listener.Fields) > 0 {
 		listener.IfUpdate = strings.Join(mapStrSlice(listener.Fields, updatedFieldSQL), " and ")
 	}
 	listener.ConversationQueueName = "ListenerQueue_" + suffix
@@ -314,6 +317,7 @@ func (listener Listener) start(ch *amqp.Channel) error {
 	listener.ConversationTriggerName = "tr_Listener_" + suffix
 	listener.InstallListenerProcedureName = "sp_InstallListenerNotification_" + suffix
 	listener.UninstallListenerProcedureName = "sp_UninstallListenerNotification_" + suffix
+	listener.QuotedJoin = strings.Replace(listener.Join, "'", "''''", -1)
 	listener.QuotedWhere = strings.Replace(listener.Where, "'", "''''", -1)
 
 	execInstallationProcedureScript := getScript("execInstallationProcedureScript", `
@@ -542,16 +546,13 @@ const SQL_FORMAT_CREATE_INSTALLATION_PROCEDURE = `
 										 ), 1, 1, '''')
 					ELSE SET @select = N''{{.SelectScript}}''
 
-					SET @sqlInserted =
-						N''SET @retvalOUT = (SELECT '' + @select + N''
-											 FROM INSERTED
-											 {{if .Where}}WHERE {{.QuotedWhere}}{{end}}
-											 FOR XML PATH(''''row''''), ROOT (''''inserted''''))''
-					SET @sqlDeleted =
-						N''SET @retvalOUT = (SELECT '' + @select + N''
-											 FROM DELETED
-											 {{if .Where}}WHERE {{.QuotedWhere}}{{end}}
-											 FOR XML PATH(''''row''''), ROOT (''''deleted''''))''
+					declare @sqlXML NVARCHAR(MAX) = N''SET @retvalOUT = (SELECT '' + @select + N''
+											 FROM @t {{.QuotedJoin}}
+											 {{if .Where}}WHERE {{.QuotedWhere}}{{end}} FOR XML PATH(''''row''''), ROOT (''''@t''''))''
+
+					SET @sqlInserted = REPLACE(@sqlXML, N''@t'', N''inserted'')
+					SET @sqlDeleted = REPLACE(@sqlXML, N''@t'', N''deleted'')
+		
 					SET @triggerStatement = REPLACE(@triggerStatement
 											 , ''%inserted_select_statement%'', @sqlInserted)
 					SET @triggerStatement = REPLACE(@triggerStatement
