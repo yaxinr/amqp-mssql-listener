@@ -618,11 +618,11 @@ const SQL_FORMAT_CREATE_NOTIFICATION_TRIGGER = `
 	ON {{.SchemaName}}.[{{.TableName}}]
 	AFTER {{.TriggerType}}
 	AS
-	{{if .IfUpdate}}IF {{.IfUpdate}}{{end}}
 	BEGIN
 		SET NOCOUNT ON;
 
 		--Trigger {{.TableName}} is rising...
+		{{if .IfUpdate}}IF {{.IfUpdate}}{{end}}
 		IF EXISTS (SELECT * FROM sys.services WHERE name = '{{.ConversationServiceName}}')
 		BEGIN
 			DECLARE @message NVARCHAR(MAX) = ''
@@ -651,8 +651,7 @@ const SQL_FORMAT_CREATE_NOTIFICATION_TRIGGER = `
 			BEGIN DIALOG @ConvHandle
 				FROM SERVICE [{{.ConversationServiceName}}] TO SERVICE '{{.ConversationServiceName}}' ON CONTRACT [DEFAULT] WITH ENCRYPTION=OFF, LIFETIME = 60;
 
-			SEND ON CONVERSATION @ConvHandle MESSAGE TYPE [DEFAULT] (@message);
-
+				SEND ON CONVERSATION @ConvHandle MESSAGE TYPE [DEFAULT] (@message);
 			END CONVERSATION @ConvHandle;
 		END
 	END
